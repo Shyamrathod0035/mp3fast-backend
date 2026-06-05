@@ -85,39 +85,65 @@ function getVideoInfo($url)
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $cookiesFile = __DIR__ . DIRECTORY_SEPARATOR . 'cookies.txt';
+    $cookiesParam = file_exists($cookiesFile) ? ' --cookies ' . escapeshellarg($cookiesFile) : '';
 
-    $cookiesParam = '';
-    if (file_exists($cookiesFile)) {
-        $cookiesParam = ' --cookies ' . escapeshellarg($cookiesFile);
-    }
-
+    // 1. Try direct execution first
     $output = [];
     $rc = 0;
-
     exec("$ytDlp$cookiesParam --skip-download --print-json --no-warnings $safeUrl 2>&1", $output, $rc);
-    if ($rc !== 0) {
-        $outStr = implode(" ", $output);
-        if (strpos($outStr, 'confirm you\'re not a bot') !== false || strpos($outStr, 'Sign in') !== false) {
-            if (!file_exists($cookiesFile)) {
-                return ['error' => 'YouTube blocked the request (Bot detection). Please upload your cookies.txt file to your backend repository to run natively.'];
-            }
+
+    if ($rc === 0) {
+        $json = json_decode(implode("", $output), true);
+        if ($json) {
+            return [
+                'success' => true,
+                'title' => $json['title'] ?? 'Unknown',
+                'duration' => isset($json['duration']) ? gmdate("H:i:s", $json['duration']) : 'Unknown',
+                'thumbnail' => $json['thumbnail'] ?? '',
+                'uploader' => $json['uploader'] ?? 'Unknown',
+                'url' => $url
+            ];
         }
-        return ['error' => 'Failed to retrieve video details. Error: ' . (empty($output) ? 'Unknown error' : implode("\n", $output))];
     }
 
-    $json = json_decode(implode("", $output), true);
-    if (!$json) {
-        return ['error' => 'Failed to parse video details from yt-dlp.'];
+    // 2. If blocked, try public proxy list to bypass Bot detection
+    $proxiesRaw = @file_get_contents('https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt');
+    if ($proxiesRaw) {
+        $proxies = array_filter(explode("\n", trim($proxiesRaw)));
+        shuffle($proxies);
+
+        $attempts = 5;
+        foreach ($proxies as $proxy) {
+            $proxy = trim($proxy);
+            if (empty($proxy))
+                continue;
+
+            $output = [];
+            $rc = 0;
+            $proxyParam = ' --proxy ' . escapeshellarg("http://$proxy") . ' --socket-timeout 5';
+
+            exec("$ytDlp$cookiesParam$proxyParam --skip-download --print-json --no-warnings $safeUrl 2>&1", $output, $rc);
+            if ($rc === 0) {
+                $json = json_decode(implode("", $output), true);
+                if ($json) {
+                    return [
+                        'success' => true,
+                        'title' => $json['title'] ?? 'Unknown',
+                        'duration' => isset($json['duration']) ? gmdate("H:i:s", $json['duration']) : 'Unknown',
+                        'thumbnail' => $json['thumbnail'] ?? '',
+                        'uploader' => $json['uploader'] ?? 'Unknown',
+                        'url' => $url
+                    ];
+                }
+            }
+
+            $attempts--;
+            if ($attempts <= 0)
+                break;
+        }
     }
 
-    return [
-        'success' => true,
-        'title' => $json['title'] ?? 'Unknown',
-        'duration' => isset($json['duration']) ? gmdate("H:i:s", $json['duration']) : 'Unknown',
-        'thumbnail' => $json['thumbnail'] ?? '',
-        'uploader' => $json['uploader'] ?? 'Unknown',
-        'url' => $url
-    ];
+    return ['error' => 'Failed to retrieve video details. YouTube blocked the connection. Error: ' . implode("\n", $output)];
 }
 
 function convertVideo($url)
@@ -129,47 +155,68 @@ function convertVideo($url)
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $ffmpeg = escapeshellarg(FFMPEG_PATH);
     $cookiesFile = __DIR__ . DIRECTORY_SEPARATOR . 'cookies.txt';
-
-    $cookiesParam = '';
-    if (file_exists($cookiesFile)) {
-        $cookiesParam = ' --cookies ' . escapeshellarg($cookiesFile);
-    }
+    $cookiesParam = file_exists($cookiesFile) ? ' --cookies ' . escapeshellarg($cookiesFile) : '';
 
     $uid = uniqid('yt_', true);
     $out = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid;
     $safeOut = escapeshellarg($out);
+
+    // 1. Try direct conversion first
     $output = [];
     $rc = 0;
-
     exec("$ytDlp$cookiesParam --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOut $safeUrl 2>&1", $output, $rc);
-    if ($rc !== 0) {
-        $outStr = implode(" ", $output);
-        if (strpos($outStr, 'confirm you\'re not a bot') !== false || strpos($outStr, 'Sign in') !== false) {
-            if (!file_exists($cookiesFile)) {
-                return ['error' => 'YouTube blocked the request (Bot detection). Please upload your cookies.txt file to your backend repository to run natively.'];
-            }
-        }
-        return ['error' => 'Conversion failed: ' . (empty($output) ? 'Unknown error' : implode("\n", $output))];
-    }
 
     $expected = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid . '.mp3';
-    if (file_exists($expected)) {
-        $infoOut = [];
-        exec("$ytDlp$cookiesParam --skip-download --print-json $safeUrl", $infoOut);
-        $info = json_decode(implode("", $infoOut), true);
-        $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $info['title'] ?? 'audio');
-
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
-        $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uid . '.mp3';
-
-        return [
-            'success' => true,
-            'downloadUrl' => $absoluteUrl,
-            'filename' => $title . '.mp3'
-        ];
+    if ($rc === 0 && file_exists($expected)) {
+        return getSuccessResponse($url, $uid, $ytDlp, $cookiesParam);
     }
 
-    return ['error' => 'Output file was not found on the backend server.'];
+    // 2. If direct fails, rotate public proxies to bypass IP blocks
+    $proxiesRaw = @file_get_contents('https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt');
+    if ($proxiesRaw) {
+        $proxies = array_filter(explode("\n", trim($proxiesRaw)));
+        shuffle($proxies);
+
+        $attempts = 5;
+        foreach ($proxies as $proxy) {
+            $proxy = trim($proxy);
+            if (empty($proxy))
+                continue;
+
+            @unlink($expected);
+            $output = [];
+            $rc = 0;
+            $proxyParam = ' --proxy ' . escapeshellarg("http://$proxy") . ' --socket-timeout 5';
+
+            exec("$ytDlp$cookiesParam$proxyParam --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOut $safeUrl 2>&1", $output, $rc);
+            if ($rc === 0 && file_exists($expected)) {
+                return getSuccessResponse($url, $uid, $ytDlp, $cookiesParam . $proxyParam);
+            }
+
+            $attempts--;
+            if ($attempts <= 0)
+                break;
+        }
+    }
+
+    return ['error' => 'Conversion failed. YouTube blocked the connection. Error: ' . implode("\n", $output)];
+}
+
+function getSuccessResponse($url, $uid, $ytDlp, $params)
+{
+    $infoOut = [];
+    exec("$ytDlp$params --skip-download --print-json " . escapeshellarg($url), $infoOut);
+    $info = json_decode(implode("", $infoOut), true);
+    $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $info['title'] ?? 'audio');
+
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
+    $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uid . '.mp3';
+
+    return [
+        'success' => true,
+        'downloadUrl' => $absoluteUrl,
+        'filename' => $title . '.mp3'
+    ];
 }
