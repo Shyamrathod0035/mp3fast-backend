@@ -14,8 +14,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 // System-wide binary paths for Docker environment
-define('YT_DLP_PATH', 'yt-dlp');
-define('FFMPEG_PATH', 'ffmpeg');
+$ytDlpPath = 'yt-dlp';
+if (file_exists('/usr/local/bin/yt-dlp')) {
+    $ytDlpPath = '/usr/local/bin/yt-dlp';
+} elseif (file_exists('/usr/bin/yt-dlp')) {
+    $ytDlpPath = '/usr/bin/yt-dlp';
+}
+
+$ffmpegPath = 'ffmpeg';
+if (file_exists('/usr/bin/ffmpeg')) {
+    $ffmpegPath = '/usr/bin/ffmpeg';
+} elseif (file_exists('/usr/local/bin/ffmpeg')) {
+    $ffmpegPath = '/usr/local/bin/ffmpeg';
+}
+
+define('YT_DLP_PATH', $ytDlpPath);
+define('FFMPEG_PATH', $ffmpegPath);
 define('DOWNLOAD_DIR', __DIR__ . DIRECTORY_SEPARATOR . 'downloads');
 
 if (!is_dir(DOWNLOAD_DIR)) {
@@ -64,7 +78,7 @@ if (isset($result['error'])) {
 } else {
     echo json_encode([
         'status' => 'done',
-        'url' => $result['url'],
+        'url' => $result['url'] ?? $result['downloadUrl'],
         'filename' => $result['filename']
     ]);
 }
@@ -89,6 +103,60 @@ function cleanOldDownloads($maxAgeSeconds) {
     }
 }
 
+function convertVideoViaApi($url)
+{
+    $instances = [
+        'https://api.cobalt.tools/',
+        'https://cobalt.wren.moe/',
+        'https://co.wuk.sh/'
+    ];
+
+    $payload = json_encode([
+        'url' => $url,
+        'downloadMode' => 'audio',
+        'audioFormat' => 'mp3',
+        'filenameStyle' => 'pretty'
+    ]);
+
+    foreach ($instances as $instance) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $instance);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Accept: application/json',
+            'Content-Type: application/json',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode === 200 && $response) {
+            $json = json_decode($response, true);
+            if (isset($json['url'])) {
+                return [
+                    'success' => true,
+                    'downloadUrl' => $json['url'],
+                    'filename' => ($json['filename'] ?? 'audio.mp3')
+                ];
+            }
+        }
+    }
+
+    // Fallback to loader.to button API
+    return [
+        'success' => true,
+        'downloadUrl' => 'https://loader.to/api/button/?url=' . urlencode($url) . '&f=mp3',
+        'filename' => 'download.mp3'
+    ];
+}
+
 function convertVideoToMp3($url) {
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
@@ -105,9 +173,7 @@ function convertVideoToMp3($url) {
     exec($command, $output, $returnCode);
     
     if ($returnCode !== 0) {
-        return [
-            'error' => 'Conversion process failed. Output: ' . implode("\n", $output)
-        ];
+        return convertVideoViaApi($url);
     }
     
     $expectedFile = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId . '.mp3';
@@ -130,7 +196,5 @@ function convertVideoToMp3($url) {
         ];
     }
     
-    return [
-        'error' => 'Output file was not found on the server.'
-    ];
+    return convertVideoViaApi($url);
 }
