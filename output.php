@@ -103,7 +103,20 @@ function cleanOldDownloads($maxAgeSeconds) {
     }
 }
 
-function convertVideoViaApi($url)
+function downloadFileFromUrl($url, $destinationPath) {
+    $ch = curl_init($url);
+    $fp = fopen($destinationPath, 'wb');
+    curl_setopt($ch, CURLOPT_FILE, $fp);
+    curl_setopt($ch, CURLOPT_HEADER, 0);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+    $success = curl_exec($ch);
+    curl_close($ch);
+    fclose($fp);
+    return $success && file_exists($destinationPath) && filesize($destinationPath) > 0;
+}
+
+function convertVideoViaApi($url, $uid)
 {
     $instances = [
         'https://api.cobalt.tools/',
@@ -140,46 +153,57 @@ function convertVideoViaApi($url)
         if ($httpCode === 200 && $response) {
             $json = json_decode($response, true);
             if (isset($json['url'])) {
-                return [
-                    'success' => true,
-                    'downloadUrl' => $json['url'],
-                    'filename' => ($json['filename'] ?? 'audio.mp3')
-                ];
+                $cobaltUrl = $json['url'];
+                $localFilePath = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid . '.mp3';
+                
+                if (downloadFileFromUrl($cobaltUrl, $localFilePath)) {
+                    $rawTitle = $json['filename'] ?? 'audio';
+                    $cleanTitle = preg_replace('/\.mp3$/i', '', $rawTitle);
+                    $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $cleanTitle);
+
+                    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
+                    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+                    $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
+                    $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uid . '.mp3';
+
+                    return [
+                        'success' => true,
+                        'url' => $absoluteUrl,
+                        'filename' => $title . '.mp3'
+                    ];
+                }
             }
         }
     }
 
-    // Fallback to loader.to button API
-    return [
-        'success' => true,
-        'downloadUrl' => 'https://loader.to/api/button/?url=' . urlencode($url) . '&f=mp3',
-        'filename' => 'download.mp3'
-    ];
+    return ['error' => 'All download methods failed.'];
 }
 
 function convertVideoToMp3($url) {
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $ffmpeg = escapeshellarg(FFMPEG_PATH);
+    $cookiesFile = __DIR__ . DIRECTORY_SEPARATOR . 'cookies.txt';
+    $cookiesParam = file_exists($cookiesFile) ? ' --cookies ' . escapeshellarg($cookiesFile) : '';
     
     $uniqueId = uniqid('yt_', true);
     $outputTemplate = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId;
     $safeOutputTemplate = escapeshellarg($outputTemplate);
     
-    $command = "$ytDlp --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOutputTemplate $safeUrl 2>&1";
+    $command = "$ytDlp$cookiesParam --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOutputTemplate $safeUrl 2>&1";
     
     $output = [];
     $returnCode = 0;
     exec($command, $output, $returnCode);
     
     if ($returnCode !== 0) {
-        return convertVideoViaApi($url);
+        return convertVideoViaApi($url, $uniqueId);
     }
     
     $expectedFile = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId . '.mp3';
     
     if (file_exists($expectedFile)) {
-        $infoCommand = "$ytDlp --skip-download --print-json $safeUrl";
+        $infoCommand = "$ytDlp$cookiesParam --skip-download --print-json $safeUrl";
         $infoOutput = [];
         exec($infoCommand, $infoOutput);
         $infoData = json_decode(implode("", $infoOutput), true);
@@ -196,5 +220,5 @@ function convertVideoToMp3($url) {
         ];
     }
     
-    return convertVideoViaApi($url);
+    return convertVideoViaApi($url, $uniqueId);
 }
