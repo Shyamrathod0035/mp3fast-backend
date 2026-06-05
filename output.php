@@ -78,7 +78,7 @@ if (isset($result['error'])) {
 } else {
     echo json_encode([
         'status' => 'done',
-        'url' => $result['url'] ?? $result['downloadUrl'],
+        'url' => $result['url'],
         'filename' => $result['filename']
     ]);
 }
@@ -103,88 +103,16 @@ function cleanOldDownloads($maxAgeSeconds) {
     }
 }
 
-function downloadFileFromUrl($url, $destinationPath) {
-    $ch = curl_init($url);
-    $fp = fopen($destinationPath, 'wb');
-    curl_setopt($ch, CURLOPT_FILE, $fp);
-    curl_setopt($ch, CURLOPT_HEADER, 0);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120);
-    $success = curl_exec($ch);
-    curl_close($ch);
-    fclose($fp);
-    return $success && file_exists($destinationPath) && filesize($destinationPath) > 0;
-}
-
-function convertVideoViaApi($url, $uid)
-{
-    $instances = [
-        'https://api.cobalt.tools/',
-        'https://cobalt.wren.moe/',
-        'https://co.wuk.sh/'
-    ];
-
-    $payload = json_encode([
-        'url' => $url,
-        'downloadMode' => 'audio',
-        'audioFormat' => 'mp3',
-        'filenameStyle' => 'pretty'
-    ]);
-
-    foreach ($instances as $instance) {
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $instance);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Accept: application/json',
-            'Content-Type: application/json',
-            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-        ]);
-
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($httpCode === 200 && $response) {
-            $json = json_decode($response, true);
-            if (isset($json['url'])) {
-                $cobaltUrl = $json['url'];
-                $localFilePath = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid . '.mp3';
-                
-                if (downloadFileFromUrl($cobaltUrl, $localFilePath)) {
-                    $rawTitle = $json['filename'] ?? 'audio';
-                    $cleanTitle = preg_replace('/\.mp3$/i', '', $rawTitle);
-                    $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $cleanTitle);
-
-                    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
-                    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-                    $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
-                    $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uid . '.mp3';
-
-                    return [
-                        'success' => true,
-                        'url' => $absoluteUrl,
-                        'filename' => $title . '.mp3'
-                    ];
-                }
-            }
-        }
-    }
-
-    return ['error' => 'All download methods failed.'];
-}
-
 function convertVideoToMp3($url) {
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $ffmpeg = escapeshellarg(FFMPEG_PATH);
     $cookiesFile = __DIR__ . DIRECTORY_SEPARATOR . 'cookies.txt';
-    $cookiesParam = file_exists($cookiesFile) ? ' --cookies ' . escapeshellarg($cookiesFile) : '';
+    
+    $cookiesParam = '';
+    if (file_exists($cookiesFile)) {
+        $cookiesParam = ' --cookies ' . escapeshellarg($cookiesFile);
+    }
     
     $uniqueId = uniqid('yt_', true);
     $outputTemplate = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId;
@@ -197,7 +125,15 @@ function convertVideoToMp3($url) {
     exec($command, $output, $returnCode);
     
     if ($returnCode !== 0) {
-        return convertVideoViaApi($url, $uniqueId);
+        $outStr = implode(" ", $output);
+        if (strpos($outStr, 'confirm you\'re not a bot') !== false || strpos($outStr, 'Sign in') !== false) {
+            if (!file_exists($cookiesFile)) {
+                return ['error' => 'YouTube blocked the request (Bot detection). Please upload your cookies.txt file to your backend repository to run natively.'];
+            }
+        }
+        return [
+            'error' => 'Conversion process failed. Output: ' . implode("\n", $output)
+        ];
     }
     
     $expectedFile = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId . '.mp3';
@@ -220,5 +156,7 @@ function convertVideoToMp3($url) {
         ];
     }
     
-    return convertVideoViaApi($url, $uniqueId);
+    return [
+        'error' => 'Output file was not found on the server.'
+    ];
 }
