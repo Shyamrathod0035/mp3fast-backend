@@ -75,24 +75,107 @@ function validateYoutubeUrl($url)
     return in_array($host, ['youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com']);
 }
 
+function getVideoInfoViaApi($url)
+{
+    $apiUrl = 'https://noembed.com/embed?url=' . urlencode($url);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $apiUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    $response = curl_exec($ch);
+    curl_close($ch);
+
+    $json = json_decode($response, true);
+    if (!$json || isset($json['error'])) {
+        return ['error' => 'Failed to retrieve video details from API.'];
+    }
+
+    return [
+        'success' => true,
+        'title' => $json['title'] ?? 'Unknown Video',
+        'duration' => 'Track',
+        'thumbnail' => $json['thumbnail_url'] ?? '',
+        'uploader' => $json['author_name'] ?? 'Unknown Uploader',
+        'url' => $url
+    ];
+}
+
+function convertVideoViaApi($url)
+{
+    $instances = [
+        'https://api.cobalt.tools/',
+        'https://cobalt.wren.moe/',
+        'https://co.wuk.sh/'
+    ];
+
+    $payload = json_encode([
+        'url' => $url,
+        'downloadMode' => 'audio',
+        'audioFormat' => 'mp3',
+        'filenameStyle' => 'pretty'
+    ]);
+
+    foreach ($instances as $instance) {
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $instance);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Accept: application/json',
+            'Content-Type: application/json',
+            'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($httpCode === 200 && $response) {
+            $json = json_decode($response, true);
+            if (isset($json['url'])) {
+                return [
+                    'success' => true,
+                    'downloadUrl' => $json['url'],
+                    'filename' => ($json['filename'] ?? 'audio.mp3')
+                ];
+            }
+        }
+    }
+
+    // Fallback to loader.to button API
+    return [
+        'success' => true,
+        'downloadUrl' => 'https://loader.to/api/button/?url=' . urlencode($url) . '&f=mp3',
+        'filename' => 'download.mp3'
+    ];
+}
+
 function getVideoInfo($url)
 {
     if (!validateYoutubeUrl($url))
         return ['error' => 'Please enter a valid YouTube URL.'];
+
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $output = [];
     $rc = 0;
+
     exec("$ytDlp --skip-download --print-json --no-warnings $safeUrl 2>&1", $output, $rc);
-    if ($rc !== 0)
-        return [
-            'error' => 'Failed to retrieve video details. Debug: RC=' . $rc . ', Output=' . implode(" | ", $output)
-        ];
+    if ($rc !== 0) {
+        return getVideoInfoViaApi($url);
+    }
+
     $json = json_decode(implode("", $output), true);
-    if (!$json)
-        return [
-            'error' => 'Failed to parse video details. Debug: Output=' . implode(" | ", $output)
-        ];
+    if (!$json) {
+        return getVideoInfoViaApi($url);
+    }
+
     return [
         'success' => true,
         'title' => $json['title'] ?? 'Unknown',
@@ -107,6 +190,7 @@ function convertVideo($url)
 {
     if (!validateYoutubeUrl($url))
         return ['error' => 'Invalid URL.'];
+
     $safeUrl = escapeshellarg($url);
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $ffmpeg = escapeshellarg(FFMPEG_PATH);
@@ -116,12 +200,10 @@ function convertVideo($url)
     $output = [];
     $rc = 0;
 
-    // Convert audio to mp3 using yt-dlp & ffmpeg
     exec("$ytDlp --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOut $safeUrl 2>&1", $output, $rc);
-    if ($rc !== 0)
-        return [
-            'error' => 'Conversion failed. Debug: RC=' . $rc . ', Output=' . implode(" | ", $output)
-        ];
+    if ($rc !== 0) {
+        return convertVideoViaApi($url);
+    }
 
     $expected = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid . '.mp3';
     if (file_exists($expected)) {
@@ -130,7 +212,6 @@ function convertVideo($url)
         $info = json_decode(implode("", $infoOut), true);
         $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $info['title'] ?? 'audio');
 
-        // Dynamically build the absolute download URL
         $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
         $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
         $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
@@ -142,5 +223,6 @@ function convertVideo($url)
             'filename' => $title . '.mp3'
         ];
     }
-    return ['error' => 'Converted file not found.'];
+
+    return convertVideoViaApi($url);
 }
