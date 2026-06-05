@@ -108,55 +108,70 @@ function convertVideoToMp3($url) {
     $ytDlp = escapeshellarg(YT_DLP_PATH);
     $ffmpeg = escapeshellarg(FFMPEG_PATH);
     $cookiesFile = __DIR__ . DIRECTORY_SEPARATOR . 'cookies.txt';
-    
-    $cookiesParam = '';
-    if (file_exists($cookiesFile)) {
-        $cookiesParam = ' --cookies ' . escapeshellarg($cookiesFile);
-    }
+    $cookiesParam = file_exists($cookiesFile) ? ' --cookies ' . escapeshellarg($cookiesFile) : '';
     
     $uniqueId = uniqid('yt_', true);
     $outputTemplate = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId;
     $safeOutputTemplate = escapeshellarg($outputTemplate);
     
+    // 1. Try direct conversion first
     $command = "$ytDlp$cookiesParam --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOutputTemplate $safeUrl 2>&1";
-    
     $output = [];
     $returnCode = 0;
     exec($command, $output, $returnCode);
     
-    if ($returnCode !== 0) {
-        $outStr = implode(" ", $output);
-        if (strpos($outStr, 'confirm you\'re not a bot') !== false || strpos($outStr, 'Sign in') !== false) {
-            if (!file_exists($cookiesFile)) {
-                return ['error' => 'YouTube blocked the request (Bot detection). Please upload your cookies.txt file to your backend repository to run natively.'];
-            }
-        }
-        return [
-            'error' => 'Conversion process failed. Output: ' . implode("\n", $output)
-        ];
+    $expectedFile = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId . '.mp3';
+    if ($returnCode === 0 && file_exists($expectedFile)) {
+        return getSuccessData($url, $uniqueId, $ytDlp, $cookiesParam);
     }
     
-    $expectedFile = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uniqueId . '.mp3';
-    
-    if (file_exists($expectedFile)) {
-        $infoCommand = "$ytDlp$cookiesParam --skip-download --print-json $safeUrl";
-        $infoOutput = [];
-        exec($infoCommand, $infoOutput);
-        $infoData = json_decode(implode("", $infoOutput), true);
-        $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $infoData['title'] ?? 'audio');
+    // 2. If direct fails, try proxy rotation
+    $proxiesRaw = @file_get_contents('https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt');
+    if ($proxiesRaw) {
+        $proxies = array_filter(explode("\n", trim($proxiesRaw)));
+        shuffle($proxies);
         
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
-        $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-        $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
-        $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uniqueId . '.mp3';
-        
-        return [
-            'url' => $absoluteUrl,
-            'filename' => $title . '.mp3'
-        ];
+        $attempts = 5;
+        foreach ($proxies as $proxy) {
+            $proxy = trim($proxy);
+            if (empty($proxy)) continue;
+            
+            @unlink($expectedFile);
+            $output = [];
+            $returnCode = 0;
+            $proxyParam = ' --proxy ' . escapeshellarg("http://$proxy") . ' --socket-timeout 5';
+            
+            $command = "$ytDlp$cookiesParam$proxyParam --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOutputTemplate $safeUrl 2>&1";
+            exec($command, $output, $returnCode);
+            
+            if ($returnCode === 0 && file_exists($expectedFile)) {
+                return getSuccessData($url, $uniqueId, $ytDlp, $cookiesParam . $proxyParam);
+            }
+            
+            $attempts--;
+            if ($attempts <= 0) break;
+        }
     }
     
     return [
-        'error' => 'Output file was not found on the server.'
+        'error' => 'Conversion process failed. Output: ' . implode("\n", $output)
+    ];
+}
+
+function getSuccessData($url, $uniqueId, $ytDlp, $params) {
+    $infoCommand = "$ytDlp$params --skip-download --print-json " . escapeshellarg($url);
+    $infoOutput = [];
+    exec($infoCommand, $infoOutput);
+    $infoData = json_decode(implode("", $infoOutput), true);
+    $title = preg_replace('/[^A-Za-z0-9_\-]/', '_', $infoData['title'] ?? 'audio');
+    
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || ($_SERVER['SERVER_PORT'] ?? 80) == 443) ? "https://" : "http://";
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $uri = rtrim(dirname($_SERVER['PHP_SELF']), '/\\');
+    $absoluteUrl = $protocol . $host . $uri . '/downloads/' . $uniqueId . '.mp3';
+    
+    return [
+        'url' => $absoluteUrl,
+        'filename' => $title . '.mp3'
     ];
 }
