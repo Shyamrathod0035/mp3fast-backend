@@ -9,8 +9,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 // System-wide binary paths for Docker environment
-define('YT_DLP_PATH', 'yt-dlp');
-define('FFMPEG_PATH', 'ffmpeg');
+$ytDlpPath = 'yt-dlp';
+if (file_exists('/usr/local/bin/yt-dlp')) {
+    $ytDlpPath = '/usr/local/bin/yt-dlp';
+} elseif (file_exists('/usr/bin/yt-dlp')) {
+    $ytDlpPath = '/usr/bin/yt-dlp';
+}
+
+$ffmpegPath = 'ffmpeg';
+if (file_exists('/usr/bin/ffmpeg')) {
+    $ffmpegPath = '/usr/bin/ffmpeg';
+} elseif (file_exists('/usr/local/bin/ffmpeg')) {
+    $ffmpegPath = '/usr/local/bin/ffmpeg';
+}
+
+define('YT_DLP_PATH', $ytDlpPath);
+define('FFMPEG_PATH', $ffmpegPath);
 define('DOWNLOAD_DIR', __DIR__ . DIRECTORY_SEPARATOR . 'downloads');
 
 if (!is_dir(DOWNLOAD_DIR)) {
@@ -46,7 +60,9 @@ if (isset($_GET['action'])) {
 header('Content-Type: application/json');
 echo json_encode([
     'status' => 'online',
-    'message' => 'YouTube to MP3 Converter API is running.'
+    'message' => 'YouTube to MP3 Converter API is running.',
+    'yt_dlp_path' => YT_DLP_PATH,
+    'ffmpeg_path' => FFMPEG_PATH
 ]);
 exit;
 
@@ -69,10 +85,14 @@ function getVideoInfo($url)
     $rc = 0;
     exec("$ytDlp --skip-download --print-json --no-warnings $safeUrl 2>&1", $output, $rc);
     if ($rc !== 0)
-        return ['error' => 'Failed to retrieve video details.'];
+        return [
+            'error' => 'Failed to retrieve video details. Debug: RC=' . $rc . ', Output=' . implode(" | ", $output)
+        ];
     $json = json_decode(implode("", $output), true);
     if (!$json)
-        return ['error' => 'Failed to parse video details.'];
+        return [
+            'error' => 'Failed to parse video details. Debug: Output=' . implode(" | ", $output)
+        ];
     return [
         'success' => true,
         'title' => $json['title'] ?? 'Unknown',
@@ -99,7 +119,9 @@ function convertVideo($url)
     // Convert audio to mp3 using yt-dlp & ffmpeg
     exec("$ytDlp --ffmpeg-location $ffmpeg -f ba -x --audio-format mp3 --audio-quality 0 -o $safeOut $safeUrl 2>&1", $output, $rc);
     if ($rc !== 0)
-        return ['error' => 'Conversion failed.'];
+        return [
+            'error' => 'Conversion failed. Debug: RC=' . $rc . ', Output=' . implode(" | ", $output)
+        ];
 
     $expected = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $uid . '.mp3';
     if (file_exists($expected)) {
