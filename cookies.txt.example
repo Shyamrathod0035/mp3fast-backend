@@ -1,0 +1,7 @@
+# How to use cookies.txt to bypass YouTube bot detection:
+#
+# 1. Install a browser extension like "Get cookies.txt LOCALLY" (Chrome) or "cookies.txt" (Firefox).
+# 2. Go to YouTube, log in if needed, and export the cookies as a Netscape-format text file.
+# 3. Rename the exported file to exactly "cookies.txt" and place it in this directory.
+# 4. Commit and push "cookies.txt" to your GitHub repository.
+# 5. Render will rebuild and use your own server's yt-dlp binary with the cookies to convert files natively!
